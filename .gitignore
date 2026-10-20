@@ -1,0 +1,21 @@
+# 只跟踪源码：默认忽略所有文件，再按扩展名放行
+*
+!.gitignore
+!requirements.txt
+
+# 允许进入子目录，便于按扩展名匹配
+!*/
+
+# 环境与 IDE 状态
+.venv/
+.idea/
+__pycache__/
+
+# 运行产物与抓取数据
+**/runtime/
+**/admin_runtime/
+
+# 源码
+!*.py
+!*.js
+!*.html

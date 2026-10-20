@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>海关数据采集后台</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171e2e; --panel2: #1d2537; --border: #2a3450;
+    --text: #dbe4f5; --muted: #8b96ad; --accent: #4d8dff; --green: #34c98e;
+    --red: #ff6b6b; --orange: #ffb454; --gray: #7a869c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+           gap: 10px; padding: 14px 22px; background: var(--panel);
+           border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
+  .brand { font-size: 17px; font-weight: 600; }
+  .brand small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+          padding: 3px 10px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .chip b { color: var(--text); font-weight: 600; }
+  main { max-width: 1180px; margin: 0 auto; padding: 18px 22px 60px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+          padding: 16px 18px; margin-bottom: 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; display: flex;
+             align-items: center; gap: 10px; }
+  .card h2 .tag { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border);
+           vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; white-space: nowrap; }
+  td.mono, .mono { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+  .empty { color: var(--muted); text-align: center; padding: 22px 0; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 12px;
+           white-space: nowrap; }
+  .b-queued { background: #2a3450; color: #a9b7d9; }
+  .b-running { background: #12305e; color: #7db4ff; }
+  .b-running::before { content: "●"; margin-right: 5px; animation: pulse 1.2s infinite; }
+  .b-succeeded { background: #0f3a2b; color: var(--green); }
+  .b-failed { background: #43191c; color: var(--red); }
+  .b-stopped { background: #3d2c10; color: var(--orange); }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .btn { display: inline-block; border: 1px solid var(--border); background: var(--panel2);
+         color: var(--text); border-radius: 6px; padding: 5px 12px; font-size: 12.5px;
+         cursor: pointer; text-decoration: none; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .btn.danger { background: #43201f; border-color: #6b3433; color: #ff9c9c; }
+  .btn.small { padding: 2px 8px; font-size: 12px; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .field { margin-bottom: 11px; }
+  .field label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .field label b { color: var(--text); font-weight: 500; }
+  input[type=text], input[type=number], select, textarea {
+    width: 100%; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px;
+    font-size: 13px; font-family: inherit; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 10px; }
+  .row > .field { flex: 1; }
+  .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  .checks label { display: inline-flex; align-items: center; gap: 5px; color: var(--text);
+                  font-size: 13px; cursor: pointer; }
+  .checks input { accent-color: var(--accent); }
+  .form-actions { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
+  .form-msg { font-size: 12.5px; min-height: 18px; }
+  .form-msg.ok { color: var(--green); }
+  .form-msg.err { color: var(--red); }
+  /* 日志抽屉 */
+  .drawer-mask { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 20;
+                 display: none; }
+  .drawer-mask.show { display: block; }
+  .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(680px, 92vw);
+            background: #0b0f18; border-left: 1px solid var(--border); z-index: 21;
+            display: flex; flex-direction: column; transform: translateX(100%);
+            transition: transform .18s ease; }
+  .drawer.show { transform: translateX(0); }
+  .drawer-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px;
+                 border-bottom: 1px solid var(--border); background: var(--panel); }
+  .drawer-head .title { font-weight: 600; font-size: 14px; flex: 1; overflow: hidden;
+                        text-overflow: ellipsis; white-space: nowrap; }
+  .drawer-body { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  #log-body { margin: 0; white-space: pre-wrap; word-break: break-all;
+              font-family: Consolas, "Courier New", monospace; font-size: 12px;
+              line-height: 1.55; color: #c6d2e8; }
+  #log-body .warn { color: #e8c56b; }
+  #log-body .err { color: #ff8f8f; }
+  #log-body .ok { color: #5fd6a4; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">海关数据采集后台 <small>stats.customs.gov.cn · 瑞数 RS6 链路</small></div>
+  <div class="chips">
+    <span class="chip">判重哈希 <b id="stat-hashes">--</b></span>
+    <span class="chip">result.csv <b id="stat-csv">--</b></span>
+    <span class="chip">MySQL 行数 <b id="stat-db">--</b></span>
+    <span class="chip">运行中 <b id="stat-running">0</b> · 排队 <b id="stat-queued">0</b></span>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>任务列表 <span class="tag">同一时间只运行一个采集任务，其余按提交顺序排队；可中途停止</span>
+      <button class="btn small" id="btn-refresh" style="margin-left:auto">刷新</button></h2>
+    <table>
+      <thead>
+        <tr>
+          <th>任务</th><th>类型</th><th>参数</th><th>状态</th><th>开始时间</th>
+          <th>耗时</th><th>结果摘要</th><th style="width:170px">操作</th>
+        </tr>
+      </thead>
+      <tbody id="task-body"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+    </table>
+    <div class="hint">脚本共享 runtime/ 工作文件与判重哈希，串行执行保证安全；排队中任务可「取消」，运行中任务可「停止」（连带结束 Node 子进程）。</div>
+  </section>
+
+  <div class="cols">
+    <section class="card">
+      <h2>单轮查询 → CSV <span class="tag">test_csv.py · 成功后可直接下载 result.csv</span></h2>
+      <form id="form-csv" onsubmit="return submitTask('csv', this)">
+        <div class="row">
+          <div class="field"><label><b>年份</b></label><input type="number" name="year" min="2000" max="2100" required></div>
+          <div class="field"><label><b>月份范围</b>（起月:止月）</label><input type="text" name="months" placeholder="1:12" required></div>
+        </div>
+        <div class="row">
+          <div class="field"><label><b>商品编码</b>（逗号分隔可多个）</label><input type="text" name="goods" placeholder="08092900" required></div>
+          <div class="field"><label><b>方向 iEType</b></label>
+            <select name="ietype">
+              <option value="10">10 · 进出口</option>
+              <option value="1">1 · 进口</option>
+              <option value="0">0 · 出口</option>
+            </select></div>
+        </div>
+        <div class="row">
+          <div class="field"><label><b>页码</b></label><input type="number" name="page" min="1" value="1"></div>
+          <div class="field"><label><b>每页条数</b></label>
+            <select name="page_size">
+              <option value="200">200</option><option value="100">100</option>
+              <option value="50">50</option><option value="20">20</option><option value="10">10</option>
+            </select></div>
+        </div>
+        <div class="field"><label><b>代理</b>（留空 = 脚本内置隧道；<span class="mono">direct</span> = 直连；或填完整代理 URL）</label>
+          <input type="text" name="proxy"></div>
+        <div class="form-actions">
+          <button type="submit" class="btn primary">▶ 触发单轮查询</button>
+          <span class="form-msg" id="msg-csv"></span>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>批量采集 → Kafka / MySQL <span class="tag">test_db.py · 多商品 × 年份段 × 进出口分向</span></h2>
+      <form id="form-db" onsubmit="return submitTask('db', this)">
+        <div class="field"><label><b>商品编码</b>（可多选；可在下方补充其他编码）</label>
+          <div class="checks" id="db-goods"></div>
+          <input type="text" id="db-goods-extra" placeholder="其他编码，逗号分隔（可选）" style="margin-top:6px">
+        </div>
+        <div class="field"><label><b>年份段</b>（每行一段，格式 年:起月:止月，如 2026:1:8）</label>
+          <textarea name="years" rows="3" placeholder="2026:1:8"></textarea></div>
+        <div class="row">
+          <div class="field"><label><b>输出目标 SINK_MODE</b></label>
+            <select name="sink">
+              <option value="both">both · Kafka + MySQL</option>
+              <option value="kafka">kafka · 只投 Kafka</option>
+              <option value="mysql">mysql · 只入库 MySQL</option>
+            </select></div>
+          <div class="field"><label><b>每页条数</b></label>
+            <select name="page_size">
+              <option value="200">200</option><option value="100">100</option>
+              <option value="50">50</option><option value="20">20</option>
+            </select></div>
+        </div>
+        <div class="field"><label><b>代理</b>（留空 = 脚本内置隧道；<span class="mono">direct</span> = 直连；或填完整代理 URL）</label>
+          <input type="text" name="proxy"></div>
+        <div class="form-actions">
+          <button type="submit" class="btn primary">▶ 触发批量采集</button>
+          <span class="form-msg" id="msg-db"></span>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>环境与配置 <span class="tag">来自脚本文件顶部常量，改动请直接编辑脚本</span></h2>
+    <div class="chips" id="cfg-chips"></div>
+  </section>
+</main>
+
+<div class="drawer-mask" id="drawer-mask" onclick="closeLog()"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <span class="badge" id="log-badge"></span>
+    <span class="title" id="log-title"></span>
+    <button class="btn small danger" id="btn-log-stop" onclick="stopCurrent()">停止</button>
+    <button class="btn small" id="btn-log-csv" style="display:none" onclick="downloadCsv()">下载 CSV</button>
+    <button class="btn small" onclick="closeLog()">关闭</button>
+  </div>
+  <div class="drawer-body"><pre id="log-body">加载中…</pre></div>
+</div>
+
+<script>
+const CFG = {{ cfg | tojson }};
+const STATUS_TEXT = {{ status_text | tojson }};
+let logTask = null, logOffset = 0, logPoll = null, logAtBottom = true;
+
+function $(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function fmtTime(iso) { return iso ? iso.replace("T", " ").slice(5, 19) : "—"; }
+
+/* ---------- 初始化：表单默认值 / 商品复选框 / 配置区 ---------- */
+function initForms() {
+  const c = CFG.csv_defaults || {}, d = CFG.db_defaults || {};
+  const f = $("form-csv");
+  f.year.value = c.year || 2026;
+  f.months.value = c.months || "1:12";
+  f.goods.value = c.goods || "";
+  f.ietype.value = c.ietype || "10";
+  f.page.value = c.page || 1;
+  f.page_size.value = c.page_size || "200";
+  f.proxy.value = c.proxy || "";
+
+  const db = $("form-db");
+  const box = $("db-goods");
+  const enabled = d.goods || [];
+  for (const [code, name] of Object.entries(CFG.goods_names || {})) {
+    const lab = document.createElement("label");
+    lab.innerHTML = `<input type="checkbox" name="goods" value="${esc(code)}" ${enabled.includes(code) ? "checked" : ""}> ${esc(code)} ${esc(name)}`;
+    box.appendChild(lab);
+  }
+  db.years.value = d.years || "";
+  db.sink.value = d.sink || "both";
+  db.page_size.value = d.page_size || "200";
+  db.proxy.value = d.proxy || "";
+
+  const chips = $("cfg-chips");
+  const parts = [];
+  if (CFG.kafka) parts.push(`Kafka: <b>${esc(CFG.kafka.bootstrap.join(","))}</b> / ${esc(CFG.kafka.topic)}`);
+  if (CFG.mysql) parts.push(`MySQL: <b>${esc(CFG.mysql.host)}:${esc(CFG.mysql.port)}/${esc(CFG.mysql.database)}</b> · ${esc(CFG.mysql.table)}`);
+  parts.push(`Python <b>${esc(CFG.python)}</b>`, `Node <b>${esc(CFG.node || "未检测到")}</b>`);
+  for (const p of parts) {
+    const s = document.createElement("span");
+    s.className = "chip";
+    s.innerHTML = p;
+    chips.appendChild(s);
+  }
+}
+
+/* ---------- 任务提交 ---------- */
+async function submitTask(kind, form) {
+  const msg = $(`msg-${kind}`);
+  msg.className = "form-msg";
+  msg.textContent = "";
+  const fd = new FormData(form);
+  const data = { kind, goods: [], proxy: fd.get("proxy") ?? "" };
+  for (const [k, v] of fd.entries()) {
+    if (k === "proxy") continue;
+    if (k === "goods" && kind === "db") data.goods.push(v);
+    else data[k] = v;
+  }
+  if (kind === "db") {
+    const extra = $("db-goods-extra").value.split(",").map(s => s.trim()).filter(Boolean);
+    data.goods.push(...extra);
+  }
+  const res = await fetch("/api/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  const j = await res.json();
+  if (res.ok) {
+    msg.className = "form-msg ok";
+    msg.textContent = `已加入队列：${j.id}（${j.label}）`;
+    refreshTasks();
+    openLog(j.id);
+  } else {
+    msg.className = "form-msg err";
+    msg.textContent = j.error || "提交失败";
+  }
+  return false;
+}
+
+/* ---------- 任务列表 ---------- */
+async function refreshTasks() {
+  const res = await fetch("/api/tasks");
+  const j = await res.json();
+  const body = $("task-body");
+  if (!j.tasks.length) {
+    body.innerHTML = `<tr><td colspan="8" class="empty">暂无任务，从下方表单触发</td></tr>`;
+    return;
+  }
+  body.innerHTML = j.tasks.map(t => {
+    const st = STATUS_TEXT[t.status] || t.status;
+    const dur = t.started_at
+      ? ((t.finished_at ? new Date(t.finished_at) : new Date()) - new Date(t.started_at)) / 1000
+      : 0;
+    const durTxt = t.started_at ? fmtDur(dur) : "—";
+    const ops = [
+      `<button class="btn small" onclick="openLog('${t.id}')">日志</button>`,
+    ];
+    if (t.csv) ops.push(`<a class="btn small" href="/api/tasks/${t.id}/csv">CSV</a>`);
+    if (["queued", "running"].includes(t.status))
+      ops.push(`<button class="btn small danger" onclick="stopTask('${t.id}')">${t.status === "queued" ? "取消" : "停止"}</button>`);
+    const kindTxt = t.kind === "csv" ? "单轮 CSV" : "批量 DB";
+    const paramsTxt = t.kind === "csv"
+      ? `${t.params.year}年${t.params.months}月 · ${t.params.goods}`
+      : `${t.params.goods.split(",").length} 商品 · ${t.params.years} · ${t.params.sink}`;
+    return `<tr>
+      <td class="mono">${t.id}</td>
+      <td>${kindTxt}</td>
+      <td title="${esc(t.label)}">${esc(paramsTxt)}</td>
+      <td><span class="badge b-${t.status}">${esc(st)}</span></td>
+      <td>${fmtTime(t.started_at)}</td>
+      <td>${durTxt}</td>
+      <td title="${esc(t.summary)}">${esc(t.summary)}</td>
+      <td>${ops.join(" ")}</td>
+    </tr>`;
+  }).join("");
+  $("stat-running").textContent = j.running ? 1 : 0;
+}
+function fmtDur(sec) {
+  if (sec < 60) return Math.round(sec) + " 秒";
+  const m = Math.floor(sec / 60);
+  return m + " 分 " + Math.round(sec % 60) + " 秒";
+}
+
+/* ---------- 停止 / 取消 ---------- */
+async function stopTask(id, ask = true) {
+  if (ask && !confirm(`确认停止任务 ${id} ？运行中任务会连带结束 Node 子进程。`)) return;
+  const res = await fetch(`/api/tasks/${id}/stop`, { method: "POST" });
+  const j = await res.json();
+  if (!res.ok) alert(j.error || "操作失败");
+  refreshTasks();
+}
+
+/* ---------- 日志抽屉 ---------- */
+async function openLog(id) {
+  logTask = id;
+  logOffset = 0;
+  $("log-body").textContent = "加载中…";
+  $("drawer").classList.add("show");
+  $("drawer-mask").classList.add("show");
+  $("log-title").textContent = id;
+  $("log-badge").className = "badge";
+  $("log-badge").textContent = "";
+  $("btn-log-csv").style.display = "none";
+  tickLog();
+}
+function closeLog() {
+  $("drawer").classList.remove("show");
+  $("drawer-mask").classList.remove("show");
+  if (logPoll) { clearTimeout(logPoll); logPoll = null; }
+  logTask = null;
+}
+async function tickLog() {
+  if (!logTask) return;
+  const res = await fetch(`/api/tasks/${logTask}/log?offset=${logOffset}`);
+  const j = await res.json();
+  if (j.text) {
+    const body = $("log-body");
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    body.textContent += j.text;
+    if (atBottom) body.scrollTop = body.scrollHeight;
+  }
+  logOffset = j.offset;
+  const badge = $("log-badge");
+  badge.className = "badge b-" + j.status;
+  badge.textContent = STATUS_TEXT[j.status] || j.status;
+  if (["running", "queued"].includes(j.status)) {
+    logPoll = setTimeout(tickLog, 1500);
+  } else {
+    // 结束后拉一次任务详情，看是否有 CSV 可下载
+    const d = await fetch(`/api/tasks/${logTask}`).then(r => r.json());
+    if (d.csv) $("btn-log-csv").style.display = "";
+    $("btn-log-stop").style.display = "none";
+    refreshTasks();
+  }
+}
+function stopCurrent() { if (logTask) stopTask(logTask); }
+function downloadCsv() { if (logTask) window.open(`/api/tasks/${logTask}/csv`, "_blank"); }
+
+/* ---------- 统计 ---------- */
+async function refreshStats() {
+  try {
+    const j = await fetch("/api/stats").then(r => r.json());
+    $("stat-hashes").textContent = j.sent_hashes;
+    $("stat-csv").textContent = j.result_csv
+      ? `${j.result_csv.rows ?? "?"} 行 · ${fmtTime(j.result_csv.mtime)}` : "无";
+    $("stat-db").textContent = j.db_rows == null ? "不可达" : j.db_rows.toLocaleString();
+    $("stat-queued").textContent = j.queued;
+  } catch (e) { /* 忽略 */ }
+}
+
+initForms();
+refreshTasks();
+refreshStats();
+setInterval(refreshTasks, 3000);
+setInterval(refreshStats, 10000);
+$("btn-refresh").onclick = refreshTasks;
+</script>
+</body>
+</html>
