@@ -7,7 +7,8 @@
   https://pfsc.agri.cn/price_portal/web/portal-price-information/detail
 
 规则:
-1. 只抓取 2024-01-01 及以后的资讯(列表接口按 queryStartTime 过滤, 当前约 3711 篇);
+1. 首次运行抓取 2024-01-01 及以后的全部资讯; 之后默认增量, 只抓上次最新发布日期
+   (回看 3 天, 防止同一天晚些时候补发的资讯漏掉)之后的数据;
 2. 每篇资讯存一个 md 文件, 文件名取列表里的 title(仅替换 Windows 不允许的字符);
 3. 图片下载到该来源目录下的 images/<md文件名>/ 中, md 里用相对路径引用;
 4. 请求先走代理, 每次失败重试, 共 3 次; 3 次都失败再直连, 同样 3 次;
@@ -15,17 +16,20 @@
 6. 支持断点续跑: 已存在、资讯 ID 相同且图片齐全的 md 直接跳过。
 
 用法:
+    python fetch_market_information.py                  # 增量: 抓上次最新发布日期之后的数据
+    python fetch_market_information.py --full           # 全量扫描 2024 年至今(已存在的仍跳过)
     python fetch_market_information.py --reset          # 清空输出目录后全量重抓
-    python fetch_market_information.py                  # 断点续跑
     python fetch_market_information.py --limit 5        # 只抓前 5 篇(调试)
     python fetch_market_information.py --start 2025-01-01
 
 输出:
     md/<来源>/<列表 title>.md
     md/<来源>/images/<列表 title>/img_01.png ...
+    md/fetch_state.json                                 # 上次抓取时间/最新发布日期, 用于增量
 """
 import argparse
 import base64
+import json
 import os
 import random
 import re
@@ -33,6 +37,7 @@ import shutil
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urljoin
@@ -47,6 +52,8 @@ DETAIL_URL = BASE_URL + "/price_portal/web/portal-price-information/detail"
 ARTICLE_PAGE = BASE_URL + "/#/newsInformationDetail?id={id}"
 
 DEFAULT_START_DATE = "2024-01-01"
+STATE_FILENAME = "fetch_state.json"
+INCREMENTAL_LOOKBACK_DAYS = 3   # 增量抓取时从上次最新发布日期往前多回看几天
 PAGE_SIZE = 100
 MAX_RETRIES = 3                  # 代理、直连各自最多尝试次数
 REQUEST_TIMEOUT = 120            # 详情含 base64 图片, 体积可达数 MB
@@ -553,21 +560,49 @@ def resolve_output_path(folder, title, article_id):
     raise RuntimeError(f"同名文件过多: {base}")
 
 
-def process_article(session, record, output_root):
+def build_id_index(output_root):
+    """扫描已有 md, 建立 资讯ID -> md 路径 的索引, 防止标题变更后重复保存。"""
+    index = {}
+    if not output_root.exists():
+        return index
+    for path in output_root.rglob("*.md"):
+        try:
+            with path.open(encoding="utf-8") as f:
+                head = f.read(800)
+        except Exception:
+            continue
+        m = re.search(r"资讯ID：(\w+)", head)
+        if m:
+            index[m.group(1)] = path
+    return index
+
+
+def process_article(session, record, output_root, id_index):
     """抓取一篇资讯, 下载图片并写入 md; 返回 'ok' / 'skip'。"""
-    pre_folder = output_root / safe_filename((record.get("source") or "").strip() or "未知来源")
-    pre_path = resolve_output_path(pre_folder, record.get("title") or record["id"], record["id"])
-    if pre_path is None:
-        return "skip"
+    existing_path = id_index.get(record["id"])
+    if existing_path is not None:
+        # 同一个 ID 已经存在: 完整就直接跳过, 不完整则在原路径重写
+        if md_is_complete(existing_path, record["id"]):
+            return "skip"
+        detail = api_post(session, DETAIL_URL, params={"id": record["id"]})
+        article = _detail_to_article(detail)
+        path = existing_path
+        folder = existing_path.parent
+    else:
+        pre_folder = output_root / safe_filename((record.get("source") or "").strip() or "未知来源")
+        pre_path = resolve_output_path(pre_folder, record.get("title") or record["id"], record["id"])
+        if pre_path is None:
+            return "skip"
 
-    detail = api_post(session, DETAIL_URL, params={"id": record["id"]})
-    article = _detail_to_article(detail)
-    folder = output_root / safe_filename(article.source)
+        detail = api_post(session, DETAIL_URL, params={"id": record["id"]})
+        article = _detail_to_article(detail)
+        folder = output_root / safe_filename(article.source)
+        folder.mkdir(parents=True, exist_ok=True)
+        path = resolve_output_path(folder, article.title, article.id)
+        if path is None:
+            return "skip"
+
     folder.mkdir(parents=True, exist_ok=True)
-    path = resolve_output_path(folder, article.title, article.id)
-    if path is None:
-        return "skip"
-
     base = path.stem
     blocks = parse_content_html(article.content_html)
     image_dir = folder / "images" / base
@@ -578,6 +613,7 @@ def process_article(session, record, output_root):
     tmp = path.with_name(path.stem + ".tmp.md")
     tmp.write_text(md_text, encoding="utf-8")
     tmp.replace(path)
+    id_index[article.id] = path
 
     paragraphs = sum(1 for b in blocks if b.kind == "paragraph")
     print(f"    {paragraphs} 段 / {image_count} 图 / {len(md_text) / 1024:.0f}KB -> {path.name}",
@@ -592,6 +628,66 @@ def _format_duration(seconds):
     return f"{hours}:{minutes:02d}:{secs:02d}"
 
 
+def latest_publish_date_in_output(output_root):
+    """扫描已有 md 的元数据, 返回最大的发布日期(YYYY-MM-DD)。"""
+    latest = ""
+    if not output_root.exists():
+        return latest
+    for path in output_root.rglob("*.md"):
+        try:
+            with path.open(encoding="utf-8") as f:
+                head = f.read(1200)
+        except Exception:
+            continue
+        m = re.search(r"发布时间：(\d{4}-\d{2}-\d{2})", head)
+        if m and m.group(1) > latest:
+            latest = m.group(1)
+    return latest
+
+
+def load_state(output_root):
+    """读取增量状态; 没有状态文件时从已有 md 反推上次最新发布日期。"""
+    state_path = output_root / STATE_FILENAME
+    state = {}
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            state = {}
+    if not state.get("last_publish_date"):
+        latest = latest_publish_date_in_output(output_root)
+        if latest:
+            state["last_publish_date"] = latest
+            state["bootstrapped_from_md"] = True
+            print(f"未找到状态文件, 从已有 md 反推上次最新发布日期: {latest}", flush=True)
+    return state, state_path
+
+
+def save_state(state_path, state):
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = state_path.with_name(state_path.name + ".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, state_path)
+
+
+def resolve_start_date(args, state):
+    """返回 (开始日期, 模式说明)。"""
+    if args.start:
+        return args.start, "手动指定开始日期"
+    if args.reset or args.full:
+        return DEFAULT_START_DATE, "全量"
+    last_date = (state.get("last_publish_date") or "").strip()
+    if not last_date:
+        return DEFAULT_START_DATE, "首次全量"
+    try:
+        start = (datetime.strptime(last_date, "%Y-%m-%d").date()
+                 - timedelta(days=INCREMENTAL_LOOKBACK_DAYS))
+        return start.isoformat(), f"增量(上次最新 {last_date}, 回看 {INCREMENTAL_LOOKBACK_DAYS} 天)"
+    except ValueError:
+        print(f"状态文件里的日期格式异常: {last_date}, 改为全量", flush=True)
+        return DEFAULT_START_DATE, "全量"
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -599,42 +695,54 @@ def main():
         pass
 
     parser = argparse.ArgumentParser(description="抓取农产品批发市场资讯并输出 Markdown")
-    parser.add_argument("--start", default=DEFAULT_START_DATE,
-                        help=f"开始日期, 默认 {DEFAULT_START_DATE}")
+    parser.add_argument("--start", default=None, help="手动指定开始日期(YYYY-MM-DD)")
     parser.add_argument("--end", default="", help="结束日期, 默认今天")
     parser.add_argument("--limit", type=int, help="最多处理多少篇(调试用)")
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="输出目录")
-    parser.add_argument("--reset", action="store_true", help="清空输出目录后重新抓取")
+    parser.add_argument("--full", action="store_true",
+                        help="忽略状态文件, 从 2024-01-01 全量扫描(已存在的仍跳过)")
+    parser.add_argument("--reset", action="store_true", help="清空输出目录后全量重抓")
     args = parser.parse_args()
 
-    start_time = f"{args.start} 00:00:00"
-    end_time = f"{args.end} 23:59:59" if args.end else time.strftime("%Y-%m-%d 23:59:59")
     output_root = Path(args.output_dir)
     if args.reset and output_root.exists():
         print(f"清空输出目录: {output_root}", flush=True)
         shutil.rmtree(output_root, ignore_errors=True)
 
+    state, state_path = load_state(output_root)
+    id_index = build_id_index(output_root)
+    if id_index:
+        print(f"已索引 {len(id_index)} 篇已有资讯", flush=True)
+    start_date, mode = resolve_start_date(args, state)
+    if args.full and not args.start:
+        mode = "全量(忽略状态文件)"
+    end_date = args.end or time.strftime("%Y-%m-%d")
+    start_time = f"{start_date} 00:00:00"
+    end_time = f"{end_date} 23:59:59"
+
     session = make_session()
-    print(f"抓取范围: {start_time} ~ {end_time}", flush=True)
+    print(f"模式: {mode}; 抓取范围: {start_time} ~ {end_time}", flush=True)
     records = fetch_all_records(session, start_time, end_time, limit=args.limit)
     if args.limit:
         records = records[:args.limit]
     # 接口的 queryStartTime 偶尔会带出边界前(发布时间在开始日期之前)的记录, 这里再按发布日期过滤
     records = [r for r in records
                if not (r.get("publishDate") or "")[:10]
-               or (r.get("publishDate") or "")[:10] >= args.start]
+               or (r.get("publishDate") or "")[:10] >= start_date]
     print(f"待处理 {len(records)} 篇, 输出目录: {output_root}", flush=True)
 
     ok = skipped = failed = 0
+    covered = []  # 已写入/已确认存在的记录, 用于推进状态里的最新发布日期
     started = time.time()
     for i, record in enumerate(records, 1):
         print(f"[{i}/{len(records)}] {record.get('title') or record['id']}", flush=True)
         try:
-            result = process_article(session, record, output_root)
+            result = process_article(session, record, output_root, id_index)
             if result == "ok":
                 ok += 1
             else:
                 skipped += 1
+            covered.append(record)
         except KeyboardInterrupt:
             print("\n手动中断, 已完成的文件保留", flush=True)
             break
@@ -656,7 +764,26 @@ def main():
 
     print(f"\n完成: 成功 {ok} 篇, 跳过 {skipped} 篇, 失败 {failed} 篇, "
           f"总耗时 {_format_duration(time.time() - started)}", flush=True)
+
+    # 只根据已成功/已存在的记录推进日期; 失败条目下次会落在 3 天回看窗口内
+    last_date = state.get("last_publish_date") or ""
+    for record in covered:
+        d = (record.get("publishDate") or "")[:10]
+        if d > last_date:
+            last_date = d
+    total_md = sum(1 for _ in output_root.rglob("*.md")) if output_root.exists() else 0
+    state.update({
+        "last_publish_date": last_date or start_date,
+        "last_run_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "last_start_date": start_date,
+        "last_end_date": end_date,
+        "last_mode": mode,
+        "total_md": total_md,
+    })
+    save_state(state_path, state)
+    print(f"状态已更新: {state_path} (上次最新发布日期: {state['last_publish_date']})", flush=True)
     if failed:
+        print("有失败条目, 下次增量会回看 3 天重新扫描, 不会漏掉。", flush=True)
         sys.exit(1)
 
 
